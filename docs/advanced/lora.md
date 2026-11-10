@@ -105,6 +105,9 @@ full-scale experiment evidence. It is not an exhaustive model whitelist.
 
 ## Quick start
 
+For two H100s with one trainer and one rollout GPU, see the
+[GPT-OSS-20B Slurm recipe](/models/gpt-oss/gpt-oss#42-lora-on-slurm-one-training-gpu-and-one-rollout-gpu).
+
 Append the following to a Megatron dense-model recipe:
 
 ```bash

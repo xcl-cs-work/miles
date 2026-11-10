@@ -46,6 +46,76 @@ python scripts/run_gpt_oss_20b.py
 The checkpoint is read from `--model-dir` (default `/root/models`) and the dataset from
 `--data-dir` (default `/root/datasets`).
 
+### 4.2 LoRA on Slurm: one training GPU and one rollout GPU
+
+`scripts/run_gpt_oss_20b_lora_disaggregated.py` prepares and runs a small GRPO
+experiment on one node with two 80 GB H100s. Megatron trains expert LoRA adapters
+on one GPU; SGLang serves the current adapter on the other. Adapter updates use
+NCCL broadcast. This is a configuration to validate on your cluster, not a
+recorded two-H100 benchmark.
+
+Use a Miles runtime containing its compatible Megatron-Bridge, Transformer
+Engine and SGLang builds. This recipe downloads `lmsys/gpt-oss-20b-bf16`, not the
+MXFP4 checkpoint used above. Its Triton expert-LoRA path requires BF16 weights.
+The launcher owns the Ray lifecycle and preserves Slurm's GPU visibility.
+
+The following submission example uses Slurm's Pyxis/Enroot container flags.
+Set the account, partition, image and **absolute** host paths for your site.
+The checkout, Megatron checkout and storage must be accessible on the compute
+node. Create the storage directory before submission; downloads require network
+access and space for the BF16 checkpoint (roughly 42 GB) plus saved adapters.
+
+```bash
+export SLURM_ACCOUNT=your_account
+export SLURM_PARTITION=your_h100_partition
+export CONTAINER_IMAGE=/absolute/path/to/miles-runtime.sqsh
+export MILES_ROOT=/absolute/path/to/miles
+export MEGATRON_ROOT=/absolute/path/to/Megatron-LM
+export RUN_STORAGE=/absolute/path/to/persistent/storage
+mkdir -p "$RUN_STORAGE"
+
+sbatch --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION" \
+  --nodes=1 --ntasks-per-node=1 --gpus-per-node=2 --exclusive \
+  --cpus-per-task=16 --mem=128G --time=02:00:00 \
+  --job-name=gpt-oss-lora --output=slurm-%j.out --export=ALL <<'SBATCH'
+#!/bin/bash
+set -euo pipefail
+srun --nodes=1 --ntasks=1 --gpus-per-node=2 \
+  --container-image="$CONTAINER_IMAGE" \
+  --container-mounts="$MILES_ROOT:/workspace/miles,$MEGATRON_ROOT:/workspace/Megatron-LM,$RUN_STORAGE:/workspace/storage" \
+  --container-workdir=/workspace/miles \
+  bash -c 'set -euo pipefail
+    export PYTHONPATH="/workspace/miles:/workspace/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
+    export HF_HOME=/workspace/storage/hf-cache
+    unset RAY_ADDRESS MILES_SCRIPT_EXTERNAL_RAY
+    python3 scripts/run_gpt_oss_20b_lora_disaggregated.py full-train \
+      --num-nodes 1 --num-gpus-per-node 2 \
+      --megatron-path /workspace/Megatron-LM \
+      --model-dir /workspace/storage/models \
+      --data-dir /workspace/storage/datasets \
+      --output-dir /workspace/storage/runs'
+SBATCH
+```
+
+`--exclusive` isolates the default Ray ports and Ray cleanup from other jobs;
+it reserves the node even when the node has more than two GPUs. Select a
+two-GPU node if available. Shared-node execution requires site-provided process
+and port isolation before dropping this flag. GPU type labels and container
+integration are site-specific; the partition above must provide H100s. Add your
+site's QOS or GPU-type constraint if needed. On a site without Pyxis, run the
+same Python command through its supported Miles container runtime.
+
+The default run is two rollouts with a 2,048-token sequence cap, microbatch one,
+full activation recomputation and four concurrent inference requests. No
+reference model or critic is allocated. Adapters are saved under
+`<output-dir>/<run-id>/checkpoints`. Increase `--num-rollout` after checking that
+both training and inference fit. `--help` lists the batch, length, LoRA and
+SGLang memory controls.
+
+Use `prepare` to download ahead of time in the same runtime with the same
+storage paths, then replace `full-train` with `train` in the batch job. For an
+interactive allocation, run the same `srun` command directly.
+
 ## 5. Recipe Configuration
 
 ### 5.1 Parallelism
