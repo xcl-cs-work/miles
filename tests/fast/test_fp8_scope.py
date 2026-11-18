@@ -31,6 +31,7 @@ def _convert(tmp_path, weights, strategy, **kwargs):
     ignored = config.get("ignore" if strategy == "channel" else "modules_to_not_convert", [])
     index = json.loads((target / "model.safetensors.index.json").read_text())
     assert set(index["weight_map"]) == set(actual)
+    assert index["metadata"]["total_size"] == sum(t.numel() * t.element_size() for t in actual.values())
     return actual, ignored
 
 
@@ -107,3 +108,78 @@ def test_selected_unsupported_block_weight_raises(tmp_path, cpu_safetensors):
     weights = {"model.layers.0.linear_attn.conv1d.weight": torch.ones(5, 1, 3, dtype=torch.bfloat16)}
     with pytest.raises(ValueError, match="Block FP8 conversion requires a 2-D weight"):
         _convert(tmp_path, weights, "block")
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("shape", [(128, 128), (129, 257)])
+def test_zero_blocks_quantize_to_finite_exact_zero(dtype, shape):
+    weight = torch.zeros(shape, dtype=dtype)
+
+    quantized, scales = converter.block_fp8(weight, [128, 128])
+
+    assert quantized.shape == weight.shape
+    assert torch.isfinite(quantized.float()).all()
+    assert torch.count_nonzero(quantized.float()) == 0
+    assert torch.isfinite(scales).all() and (scales > 0).all()
+
+
+def test_mixed_zero_and_nonzero_edge_blocks_preserve_zeros():
+    weight = torch.zeros(129, 257, dtype=torch.bfloat16)
+    weight[:128, :128] = 2
+
+    quantized, scales = converter.block_fp8(weight, [128, 128])
+    expanded_scales = scales.repeat_interleave(128, 0).repeat_interleave(128, 1)[:129, :257]
+
+    assert torch.isfinite(quantized.float()).all()
+    assert torch.isfinite(scales).all() and (scales > 0).all()
+    assert torch.equal(quantized.float() * expanded_scales, weight.float())
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("magnitude", [1.0, 1e-18])
+def test_nonzero_blocks_keep_the_original_quantization_exactly(dtype, magnitude):
+    weight = torch.linspace(-2, 3, 129 * 257).reshape(129, 257).mul(magnitude).to(dtype)
+
+    quantized, scales = converter.block_fp8(weight, [128, 128])
+
+    for row in range(scales.shape[0]):
+        for col in range(scales.shape[1]):
+            original = weight[row * 128 : (row + 1) * 128, col * 128 : (col + 1) * 128]
+            expected_scale = original.abs().max().float() / converter.FP8_MAX
+            expected = (
+                (original.float() / expected_scale)
+                .clamp(converter.FP8_MIN, converter.FP8_MAX)
+                .to(torch.float8_e4m3fn)
+            )
+            actual = quantized[row * 128 : (row + 1) * 128, col * 128 : (col + 1) * 128]
+            assert torch.equal(scales[row, col], expected_scale)
+            assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+
+
+def test_selective_expert_fp8_keeps_attention_and_sensitive_weights_exact(tmp_path, cpu_safetensors):
+    matrix = torch.linspace(-2, 3, 128 * 128).reshape(128, 128).to(torch.bfloat16)
+    experts = {
+        f"model.layers.0.mlp.experts.0.{projection}.weight": matrix.clone()
+        for projection in ("gate_proj", "up_proj", "down_proj")
+    }
+    preserved = {
+        f"model.layers.0.self_attn.{projection}.weight": matrix.clone()
+        for projection in ("q_proj", "k_proj", "v_proj", "o_proj")
+    } | {
+        "model.layers.0.self_attn.q_norm.weight": torch.ones(128, dtype=torch.float32),
+        "model.layers.0.input_layernorm.weight": torch.ones(128, dtype=torch.float32),
+        "model.layers.0.mlp.gate.weight": torch.ones(128, 128, dtype=torch.float32),
+        "model.embed_tokens.weight": matrix.clone(),
+        "lm_head.weight": matrix.clone(),
+        "model.layers.0.scalar": torch.tensor(0.5, dtype=torch.float32),
+    }
+
+    actual, ignored = _convert(
+        tmp_path, experts | preserved, "block", extra_high_precision_layers_hf=("self_attn.",)
+    )
+
+    for name in experts:
+        assert actual[name].dtype == torch.float8_e4m3fn
+        assert actual[name + "_scale_inv"].dtype == torch.float32
+    for name, original in preserved.items():
+        _assert_unchanged(actual, name, original, ignored)
