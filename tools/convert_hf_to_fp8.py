@@ -65,7 +65,9 @@ def block_fp8(weight, block_size):
     block_max = torch.max(torch.abs(qweight), dim=1, keepdim=True)[0]
     block_max = torch.max(block_max, dim=3, keepdim=True)[0]
 
-    scale = block_max.to(torch.float32).clamp(min=1e-10) / FP8_MAX
+    scale = block_max.to(torch.float32) / FP8_MAX
+    # A zero block must stay zero without changing the scale of any nonzero block.
+    scale = torch.where(block_max == 0, torch.ones_like(scale), scale)
     qweight = (
         (qweight / scale)
         .clamp(min=FP8_MIN, max=FP8_MAX)
@@ -115,7 +117,7 @@ class ConversionResult:
         with self.lock:
             for k, v in q_weights.items():
                 self.weight_map[k] = filename
-                self.param_count += len(v)
+                self.param_count += v.numel() * v.element_size()
                 if "indexer" in k:
                     self.has_dsa_layers = True
             self.modules_to_not_convert.extend(module_names)
