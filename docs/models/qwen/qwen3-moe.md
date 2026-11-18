@@ -1,6 +1,6 @@
 ---
 title: Qwen3 MoE
-description: Launch recipes for Qwen3-30B-A3B (single node) and Qwen3-235B-A22B (multi-node).
+description: Launch Qwen3-30B-A3B full-parameter and LoRA recipes, and multi-node Qwen3-235B-A22B.
 ---
 ## 1. Model Introduction
 
@@ -73,7 +73,102 @@ python scripts/run_qwen3_235b_a22b.py
 
 ### 4.2 Multi-node fan-out
 
-`run_qwen3_235b_a22b.py` ssh-fans-out to workers via `--ray-hostfile` (default `/root/mpi_rack_hostfile`) itself; you only need `MASTER_ADDR` set on the head node. Pass `--no-join-ray-workers` when the cluster is already joined. The 30 B launcher is single-node.
+`run_qwen3_235b_a22b.py` ssh-fans-out to workers via `--ray-hostfile` (default `/root/mpi_rack_hostfile`) itself; you only need `MASTER_ADDR` set on the head node. Pass `--no-join-ray-workers` when the cluster is already joined. The full-parameter `run_qwen3_30b_a3b.py` launcher is single-node.
+
+### 4.3 Qwen3-30B-A3B LoRA on two single-GPU nodes
+
+`scripts/run_qwen3_30b_a3b_lora.py` trains attention LoRA on one H100 80 GB and
+serves rollouts on another. It reuses the native Qwen3 GRPO recipe, loads the BF16
+Hugging Face checkpoint directly, and broadcasts adapter tensors through NCCL.
+Routed experts remain frozen. This layout needs two allocated GPUs, one on each
+node, with the same Miles environment and checkpoint paths available to both.
+
+Use the [installation guide](/getting-started/installation) for the patched
+training and serving dependencies. Download the checkpoint and GSM8K once into
+shared storage:
+
+```bash
+python scripts/run_qwen3_30b_a3b_lora.py prepare \
+  --model-dir /shared/models --data-dir /shared/datasets
+```
+
+For interactive testing, keep SGLang in its own allocation step and attach
+trainer jobs to it. This retains the frozen base when a trainer exits or fails.
+Activate the same environment **inside each scheduler allocation**. To require
+InfiniBand for adapter tensors, configure NCCL on both nodes before starting
+either process (replace `mlx5_0:1` with the active local HCA and port):
+
+```bash
+export NCCL_NET=IB NCCL_IB_DISABLE=0 NCCL_IB_HCA='=mlx5_0:1'
+export NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET
+```
+
+Each node must have working verbs/provider libraries. `NCCL_NET=IB` makes a
+missing IB transport fail instead of silently using sockets. Connection setup
+and control RPCs still use IP networking. Confirm `Using network IB` and
+`via NET/IB` in the actual weight-update connection logs; GPU-direct versus
+host-staged RDMA depends on the installed drivers.
+
+```bash
+# Training node, with 12 allocated CPUs and one GPU:
+ray start --head --node-ip-address "$TRAIN_IP" --port 6379 \
+  --num-gpus 1 --num-cpus 12 --dashboard-host 127.0.0.1 \
+  --min-worker-port 0 --max-worker-port 0 --disable-usage-stats
+
+# Inference node: keep this process and its allocation alive between trainer runs.
+python scripts/run_qwen3_30b_a3b_lora.py serve \
+  --model-dir /shared/models --engine-host "$ROLLOUT_IP" --engine-port 30000
+```
+
+For mixed-precision serving, `serve --hf-checkpoint /shared/models/Qwen3-30B-A3B-FP8-experts`
+can use a separately prepared checkpoint of the same base, while `train` keeps
+the original BF16 checkpoint. Optional `--sglang-quantization` and
+`--sglang-moe-runner-backend` flags select serving overrides; otherwise SGLang
+reads quantization from the checkpoint and chooses its backend. These options
+require compatible checkpoint metadata and kernels on the inference GPU. For
+selective expert FP8, preserve the attention projections used by LoRA, routers,
+norms, embeddings, and output head in their original precision. The launcher
+keeps the model dtype BF16; it does not quantize weights or validate the derived
+checkpoint's quality. Validate memory use and accuracy on the selected backend
+before a training run.
+
+The inference node needs no Ray worker. Preserve the scheduler's
+`CUDA_VISIBLE_DEVICES`, and ensure `ray status` advertises only the training
+GPU: an external engine's GPU must not also be available to Ray for training.
+Once SGLang is healthy, submit from the training allocation shell:
+
+```bash
+MILES_SCRIPT_EXTERNAL_RAY=1 MASTER_ADDR="$TRAIN_IP" \
+  RAY_ADDRESS=http://127.0.0.1:8265 \
+  python scripts/run_qwen3_30b_a3b_lora.py train \
+    --model-dir /shared/models --data-dir /shared/datasets \
+    --output-dir /shared/runs --megatron-path /shared/Megatron-LM \
+    --rollout-external-engine-addrs "$ROLLOUT_IP:30000" \
+    --num-rollout 2 --rollout-max-response-len 128 --no-enable-wandb
+```
+
+For each trainer retry, use the same external address. Miles reconnects the
+NCCL weight-update group and publishes the trainer's adapter before sampling;
+it does not own or stop the standalone SGLang process. If a trainer fails during
+a weight update, clear that incomplete session before retrying:
+
+```bash
+curl --fail --noproxy '*' -H 'Content-Type: application/json' \
+  -d '{"abort":true}' "http://$ROLLOUT_IP:30000/end_weight_update"
+curl --fail --noproxy '*' -H 'Content-Type: application/json' \
+  -d '{}' "http://$ROLLOUT_IP:30000/continue_generation"
+```
+
+An initialization failure before weight synchronization needs no session reset.
+See [Disaggregated Rollout](/advanced/disaggregated-rollout) for external-engine
+ownership and compatibility requirements.
+
+This smoke invocation caps each completion at 128 tokens. For a training run,
+increase the rollout count and response length. The launcher's dataclass owns
+the memory, batch, adapter and transport defaults; `--help` lists their overrides.
+It defaults to graceful cleanup, which together with external Ray preserves the
+existing cluster and processes. The single-GPU memory settings are a starting
+point and require validation on the installed runtime.
 
 ## 5. Recipe Configuration
 

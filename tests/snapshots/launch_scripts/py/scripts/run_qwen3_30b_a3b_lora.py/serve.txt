@@ -1,0 +1,21 @@
+### 0
+python3 -m sglang.launch_server
+  --model-path /root/models/Qwen3-30B-A3B
+  --trust-remote-code
+  --host 0.0.0.0
+  --port 30000
+  --tp-size 1
+  --dtype bfloat16
+  --mem-fraction-static 0.9
+  --enable-lora
+  --lora-backend triton
+  --max-lora-rank 16
+  --max-loras-per-batch 1
+  --lora-target-modules q_proj k_proj v_proj o_proj
+  --skip-server-warmup
+  --enable-metrics
+  --context-length 4096
+  --max-running-requests 4
+  --chunked-prefill-size 1024
+  --disable-cuda-graph
+  --lora-use-virtual-experts

@@ -30,7 +30,8 @@ Usage:
   python examples/lora/run_qwen3_lora_native.py train      --model-name Qwen3-4B --task dapo-math
 """
 
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from typing import Literal
 
 import typer
@@ -51,7 +52,7 @@ _NUM_QUERY_GROUPS = {"Qwen3-8B": 8, "Qwen3-4B": 8, "Qwen3-0.6B": 8, "Qwen3-30B-A
 
 @dataclass
 class ScriptArgs(U.ExecuteTrainConfig):
-    run_id: str = U.create_run_id()
+    run_id: str = field(default_factory=lambda: U.create_run_id())
     model_name: Literal["Qwen3-8B", "Qwen3-4B", "Qwen3-0.6B", "Qwen3-30B-A3B"] = "Qwen3-8B"
     task: Literal["gsm8k", "dapo-math"] = "gsm8k"
 
@@ -66,6 +67,8 @@ class ScriptArgs(U.ExecuteTrainConfig):
     tensor_model_parallel_size: int = 2
     # off: one engine on rollout_num_gpus_per_engine GPUs, the trainer on half the node (DP divides the batch)
     colocate: bool = True
+    actor_num_gpus_per_node: int | None = None
+    rollout_num_gpus: int | None = None
 
     lr: float = 1e-5
     lora_rank: int = 16
@@ -90,6 +93,10 @@ class ScriptArgs(U.ExecuteTrainConfig):
     extra_args: str = ""
 
     def __post_init__(self):
+        if self.actor_num_gpus_per_node is None:
+            self.actor_num_gpus_per_node = self.num_gpus_per_node if self.colocate else self.num_gpus_per_node // 2
+        if self.rollout_num_gpus is None:
+            self.rollout_num_gpus = self.rollout_num_gpus_per_engine
         if self.hf_checkpoint is None:
             self.hf_checkpoint = f"{self.model_dir}/{self.model_name}"
         if self.torch_dist is None:
@@ -157,15 +164,13 @@ def _train(args: ScriptArgs):
         f"TP{args.tensor_model_parallel_size}, rollout tp={args.rollout_num_gpus_per_engine}"
     )
     load_save_path = f"{args.save_dir}/{args.run_id}"
-    actor_num_gpus = args.num_gpus_per_node
     if args.colocate:
         placement_args = "--colocate "
     else:
-        actor_num_gpus //= 2
-        placement_args = f"--rollout-num-gpus {args.rollout_num_gpus_per_engine} "
+        placement_args = f"--rollout-num-gpus {args.rollout_num_gpus} "
 
     ckpt_args = (
-        f"--hf-checkpoint {args.hf_checkpoint} --load {args.torch_dist} "
+        f"--hf-checkpoint {shlex.quote(args.hf_checkpoint)} --load {shlex.quote(args.torch_dist)} "
         "--megatron-to-hf-mode raw --no-load-optim --no-load-rng --finetune "
     )
 
@@ -221,7 +226,8 @@ def _train(args: ScriptArgs):
     misc_args = (
         "--attention-dropout 0.0 --hidden-dropout 0.0 "
         "--update-weight-buffer-size 536870912 "
-        f"--actor-num-nodes 1 --actor-num-gpus-per-node {actor_num_gpus} {placement_args}"
+        f"--num-gpus-per-node {args.num_gpus_per_node} "
+        f"--actor-num-nodes 1 --actor-num-gpus-per-node {args.actor_num_gpus_per_node} {placement_args}"
     )
 
     wandb_args = U.get_default_wandb_args(__file__, run_id=args.run_id) if args.enable_wandb else ""
