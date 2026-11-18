@@ -102,6 +102,15 @@ _REGISTRIES = {
         expert_model_parallel_size=1,
         rollout_num_gpus_per_engine=2,
     ),
+    # Same config.json as Qwen3.5-27B; the frozen BF16 base fits one 96 GB trainer GPU
+    "Qwen3.8-27B": _Registry(
+        megatron_model_type="qwen3.8-27B",
+        hf_repo="Qwen/Qwen3.8-27B",
+        target_modules=_QWEN35_TARGET_MODULES,
+        tensor_model_parallel_size=1,
+        expert_model_parallel_size=1,
+        rollout_num_gpus_per_engine=1,
+    ),
 }
 
 
@@ -119,6 +128,10 @@ class ScriptArgs(U.ExecuteTrainConfig):
     tensor_model_parallel_size: int = 0
     expert_model_parallel_size: int = 0
     rollout_num_gpus_per_engine: int = 0
+    # off: the trainer and the engines split the node (half each unless set)
+    colocate: bool = True
+    actor_num_gpus_per_node: int | None = None
+    rollout_num_gpus: int | None = None
     max_tokens_per_gpu: int = 8192
     recompute: bool = True
 
@@ -155,6 +168,10 @@ class ScriptArgs(U.ExecuteTrainConfig):
                 setattr(
                     self, name, getattr(self.registry, name)
                 )  # config-access-exempt: copy the named parallelism default from the selected model registry
+        if self.actor_num_gpus_per_node is None:
+            self.actor_num_gpus_per_node = self.num_gpus_per_node if self.colocate else self.num_gpus_per_node // 2
+        if self.rollout_num_gpus is None:
+            self.rollout_num_gpus = self.num_gpus_per_node - self.actor_num_gpus_per_node
 
     @property
     def megatron_model_type(self) -> str:
@@ -292,10 +309,12 @@ def _train(args: ScriptArgs):
         f"--sglang-lora-backend {args.sglang_lora_backend} "
     )
 
+    placement_args = "--colocate " if args.colocate else f"--rollout-num-gpus {args.rollout_num_gpus} "
     misc_args = (
         "--attention-dropout 0.0 --hidden-dropout 0.0 "
         "--update-weight-buffer-size 536870912 "
-        f"--actor-num-nodes 1 --actor-num-gpus-per-node {args.num_gpus_per_node} --colocate "
+        f"--num-gpus-per-node {args.num_gpus_per_node} "
+        f"--actor-num-nodes 1 --actor-num-gpus-per-node {args.actor_num_gpus_per_node} {placement_args}"
     )
 
     wandb_args = U.get_default_wandb_args(__file__, run_id=args.run_id) if args.enable_wandb else ""
