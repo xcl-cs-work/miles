@@ -840,6 +840,19 @@ def _resolve_ft_components(args: argparse.Namespace) -> list[str]:
     return list(args.ft_components)
 
 
+def _validate_aux_sft_args(args) -> None:
+    if args.aux_sft_lr is None:
+        return
+    if args.train_backend != "fsdp":
+        raise ValueError("--aux-sft-lr trains a second optimizer state on the FSDP backend only")
+    assert args.aux_sft_lr > 0, "--aux-sft-lr must be positive"
+    assert 0 <= args.aux_sft_min_lr <= args.aux_sft_lr, "--aux-sft-min-lr must lie in [0, --aux-sft-lr]"
+    assert args.aux_sft_after_actor_step >= 0, "--aux-sft-after-actor-step is a 0-based step index"
+    if args.aux_sft_lr_halving_ratio is not None:
+        assert args.aux_sft_lr_halving_ratio > 0, "--aux-sft-lr-halving-ratio must be positive"
+        assert args.aux_sft_lr_halving_patience >= 1, "--aux-sft-lr-halving-patience must be at least 1"
+
+
 def _validate_rematerialize_param_from_master_weight(args):
     if not args.rematerialize_param_from_master_weight:
         return
@@ -1578,6 +1591,7 @@ def miles_validate_args(args):
         args.critic_num_nodes = args.actor_num_nodes
     if args.critic_load is None and args.train_backend != "megatron":
         args.critic_load = args.load
+    _validate_aux_sft_args(args)
     if args.critic_lr is None:
         args.critic_lr = args.lr
     if args.critic_save is None and args.save is not None:

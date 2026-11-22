@@ -27,6 +27,7 @@ def cpu_checkpoint_actor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Sim
     return SimpleNamespace(
         model=model,
         optimizer=optimizer,
+        aux_sft_optimizer=None,
         lr_scheduler=scheduler,
         args=SimpleNamespace(
             backend=FsdpArgsNamespace(

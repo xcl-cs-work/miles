@@ -88,6 +88,50 @@ class AlgoConfig(BaseConfig):
         int,
         Arg(help="number of iterations to linearly warmup for critic model."),
     ] = 0
+    aux_sft_lr: A[
+        float | None,
+        Arg(
+            help=(
+                "Enable the auxiliary SFT objective and set its learning rate. The rollout function returns "
+                "the objective's rows as RolloutFnTrainOutput.aux_sft_rows; each step trains them with a "
+                "second AdamW state over the same weights, after policy step --aux-sft-after-actor-step. "
+                "FSDP backend only (AC2's generative critic in examples/ac2 uses it)."
+            )
+        ),
+    ] = None
+    aux_sft_min_lr: A[
+        float,
+        Arg(help="Floor of the aux SFT learning rate when --aux-sft-lr-halving-ratio halves it."),
+    ] = 0.0
+    aux_sft_clip_grad: A[float, Arg(help="Gradient-norm clip of the aux SFT step.")] = 1.0
+    aux_sft_weight_decay: A[float, Arg(help="AdamW weight decay of the aux SFT optimizer.")] = 0.0
+    aux_sft_adam_beta1: A[float, Arg(help="AdamW beta1 of the aux SFT optimizer.")] = 0.9
+    aux_sft_adam_beta2: A[float, Arg(help="AdamW beta2 of the aux SFT optimizer.")] = 0.999
+    aux_sft_adam_eps: A[float, Arg(help="AdamW epsilon of the aux SFT optimizer.")] = 1e-8
+    aux_sft_after_actor_step: A[
+        int,
+        Arg(
+            help=(
+                "Run the aux SFT step after this 0-based policy optimizer step of each rollout, or after the "
+                "last one when the rollout has fewer steps."
+            )
+        ),
+    ] = 0
+    aux_sft_lr_halving_ratio: A[
+        float | None,
+        Arg(
+            help=(
+                "Halve the aux SFT learning rate (down to --aux-sft-min-lr) once the aux step's parameter "
+                "displacement exceeds this multiple of the rollout's total policy displacement for "
+                "--aux-sft-lr-halving-patience rollouts in a row, or at once on a non-finite loss or gradient. "
+                "Measuring displacement keeps one extra copy of the local parameter shards during each step."
+            )
+        ),
+    ] = None
+    aux_sft_lr_halving_patience: A[
+        int,
+        Arg(help="Consecutive breaching rollouts before --aux-sft-lr-halving-ratio halves the aux SFT lr."),
+    ] = 2
 
     eps_clip: A[float, Arg(help="PPO clip range")] = 0.2
     eps_clip_high: A[float | None, Arg(help="PPO clip upper range")] = None

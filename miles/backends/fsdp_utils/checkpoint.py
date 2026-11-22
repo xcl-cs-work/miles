@@ -79,6 +79,19 @@ def _write_checkpoint_metadata(path: Path, metadata: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
+AUX_SFT_OPTIMIZER_DIRNAME = "aux_sft_optimizer"
+
+
+def _load_aux_sft_optimizer(actor: Any, directory: Path) -> None:
+    if not directory.exists():
+        logger.info(f"[FSDP] Aux SFT optimizer checkpoint not found at {directory}, starting it fresh.")
+        return
+    dcp.load(
+        state_dict={"optim_state": OptimizerState(actor.model, actor.aux_sft_optimizer)}, checkpoint_id=str(directory)
+    )
+    logger.info(f"[FSDP] Loaded aux SFT optimizer from {directory}")
+
+
 def load(actor: Any) -> dict[str, Any] | None:
     """Load checkpoint from disk.
 
@@ -141,6 +154,8 @@ def load(actor: Any) -> dict[str, Any] | None:
             logger.warning(f"[FSDP] Failed to load optimizer from {optimizer_dir}: {e}")
     elif load_optimizer:
         logger.info(f"[FSDP] Optimizer checkpoint not found at {optimizer_dir}, skipping optimizer load.")
+    if load_optimizer and actor.aux_sft_optimizer is not None:
+        _load_aux_sft_optimizer(actor, checkpoint_dir / AUX_SFT_OPTIMIZER_DIRNAME)
 
     # Load LR scheduler state (optional)
     load_lr_scheduler = (
@@ -236,6 +251,11 @@ def save(actor: Any, iteration: int) -> None:
         optimizer_state = OptimizerState(actor.model, actor.optimizer)
         optim_state_dict = {"optim_state": optimizer_state}
         dcp.save(optim_state_dict, checkpoint_id=str(optimizer_dir))
+
+    if save_optimizer_state and actor.aux_sft_optimizer is not None:
+        # its param groups carry the learning rate --aux-sft-lr-halving-ratio may have lowered
+        aux_state_dict = {"optim_state": OptimizerState(actor.model, actor.aux_sft_optimizer)}
+        dcp.save(aux_state_dict, checkpoint_id=str(checkpoint_dir / AUX_SFT_OPTIMIZER_DIRNAME))
 
     # Save LR scheduler state (skip if --no-save-optim is set)
     if (

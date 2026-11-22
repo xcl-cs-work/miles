@@ -34,6 +34,7 @@ from miles.backends.training_utils.metrics.log_utils import (
 )
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.replay import routing_replay
+from miles.backends.training_utils.torch_native.aux_sft import AuxSftTrainer, take_aux_sft_batch
 from miles.backends.training_utils.torch_native.offload import move_train_state
 from miles.backends.training_utils.torch_native.step_runner import StepRunner
 from miles.backends.training_utils.types import TrainStepOutcome, TrainStepOutput
@@ -81,12 +82,18 @@ class TorchNativeTrainRayActor(TrainRayActor):
     hf_config: PretrainedConfig
     tokenizer: PreTrainedTokenizerBase
     ref_runner: StepRunner | None = None
+    # set by a backend that trains the aux SFT objective (--aux-sft-lr)
+    aux_sft: AuxSftTrainer | None = None
     align_token_side_channel: Callable[[torch.Tensor, int], torch.Tensor] | None = None
     # every rank holds its own slice of the rollout; a backend whose CP peers share one sets this on one of them
     dumps_train_data: bool = True
 
     def _step_runner(self) -> StepRunner:
         raise NotImplementedError
+
+    def _aux_sft_step_runner(self) -> StepRunner:
+        """The aux SFT objective's runner: the policy forward, with the aux optimizer's zero-grad and step."""
+        raise NotImplementedError(f"the {self.backend_name} backend does not train the aux SFT objective")
 
     def _ref_context(self) -> AbstractContextManager:
         return nullcontext()
@@ -219,12 +226,15 @@ class TorchNativeTrainRayActor(TrainRayActor):
             Timer().timers = timers
 
     def _train_core(self, rollout_id: int, rollout_data: dict) -> None:
+        # the side batch leaves the shard first: the policy passes and their logging read only policy rows
+        aux_sft_batch = take_aux_sft_batch(rollout_data, sample_device=response_layout_type(self.args).sample_device)
+        assert aux_sft_batch is None or self.aux_sft is not None, "aux SFT rows reached a trainer without --aux-sft-lr"
         runner = self._step_runner()
         data_iterator, num_microbatches = self._score_rollout(runner, rollout_data)
         log_rollout_data(rollout_id, self.args, rollout_data)
 
         with routing_replay.stage(routing_replay.REPLAY_BACKWARD), timer("actor_train"):
-            self._optimizer_steps(runner, data_iterator, num_microbatches, rollout_id)
+            self._optimizer_steps(runner, data_iterator, num_microbatches, rollout_id, aux_sft_batch=aux_sft_batch)
 
         self.prof.step(rollout_id=rollout_id)
         if self.dumps_train_data:
@@ -298,13 +308,22 @@ class TorchNativeTrainRayActor(TrainRayActor):
         return aggregate_forward_results(forward_store, data_iterator, args, store_prefix)
 
     def _optimizer_steps(
-        self, runner: StepRunner, data_iterator: DataIterator, num_microbatches: list[int], rollout_id: int
+        self,
+        runner: StepRunner,
+        data_iterator: DataIterator,
+        num_microbatches: list[int],
+        rollout_id: int,
+        *,
+        aux_sft_batch: dict | None = None,
     ) -> None:
         args = self.args
         state = get_parallel_state()
+        aux_sft = self.aux_sft
+        aux_step_index = aux_sft.aux_step_index(len(num_microbatches)) if aux_sft is not None else None
 
         def apply_step(step_id: int, losses_reduced: list[dict]) -> None:
-            metrics = runner.apply_step()
+            with aux_sft.measure_policy_step() if aux_sft is not None else nullcontext():
+                metrics = runner.apply_step()
             if args.ci_test:
                 check_grad_norm(
                     args=args,
@@ -325,8 +344,15 @@ class TorchNativeTrainRayActor(TrainRayActor):
                 extra_metrics=metrics.extra_metrics,
                 should_log=state.is_metrics_rank,
             )
+            if aux_sft_batch is not None and step_id == aux_step_index:
+                with timer("aux_sft_train"):
+                    aux_sft.train_step(
+                        aux_sft_batch, runner=self._aux_sft_step_runner(), fetch_batches=self._fetch_batches
+                    )
 
         self._forward_backward_steps(runner, data_iterator, num_microbatches, finish_step=apply_step)
+        if aux_sft is not None:
+            aux_sft.end_rollout(rollout_id)
 
     def _forward_backward_steps(
         self,
