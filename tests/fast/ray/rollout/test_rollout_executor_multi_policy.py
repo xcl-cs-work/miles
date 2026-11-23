@@ -83,7 +83,7 @@ def _record_generate_inputs(executor: RolloutExecutor, monkeypatch) -> list[Roll
 
     def _generate_rollout(rollout_input: RolloutFnTrainInput):
         received.append(rollout_input)
-        return SimpleNamespace(samples=[], metrics=None)
+        return SimpleNamespace(samples=[], metrics=None, aux_sft_rows=None)
 
     executor.generate_rollout = _generate_rollout
     monkeypatch.setattr(rollout_executor_module, "assert_samples_weight_version_sane", lambda *a, **kw: None)
