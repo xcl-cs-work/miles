@@ -248,8 +248,12 @@ class TorchNativeTrainRayActor(TrainRayActor):
         if self.ref_runner is not None:
             with routing_replay.stage(routing_replay.FALLTHROUGH), self._ref_context():
                 rollout_data.update(self._log_probs(self.ref_runner, data_iterator, num_microbatches, "ref_"))
-        with routing_replay.stage(routing_replay.log_prob_stage(self.args)):
-            rollout_data.update(self._log_probs(runner, data_iterator, num_microbatches))
+        # As the Megatron actor: with --use-rollout-logprobs the engine's log-probs are the old-policy baseline, so the
+        # actor's forward-only pass is needed only for --get-mismatch-metrics. The loss still reports the
+        # train-vs-rollout diff from the training forward's detached log-probs.
+        if not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics:
+            with routing_replay.stage(routing_replay.log_prob_stage(self.args)):
+                rollout_data.update(self._log_probs(runner, data_iterator, num_microbatches))
         routing_replay.rewind()
 
         # PaddedRows keeps the per-sample tensors on the host, so their whitening reduces over the gloo group
