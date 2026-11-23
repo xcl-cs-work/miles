@@ -317,7 +317,7 @@ def _parallelism_config(args: TrainerConfig) -> ParallelismConfig:
         num_pp_microbatches=_num_pipeline_microbatches(args),
         # --titan-fsdp-gather-once: one all-gather per pass and one reduce-scatter per step, holding full params and grads
         fsdp_reshard_after_forward="never" if args.backend.titan_fsdp_gather_once else "default",
-        fsdp_defer_gradient_reduction=args.backend.titan_fsdp_gather_once,
+        fsdp_defer_gradient_reduction=args.backend.titan_fsdp_gather_once or args.backend.titan_fsdp_defer_grad_sync,
     )
 
 

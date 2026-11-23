@@ -29,6 +29,10 @@ class TorchtitanArgs(FSDPArgs):
     # FSDP all-gathers params once per pass and reduce-scatters grads once per step; each rank holds full
     # bf16 params and fp32 grads for the pass
     titan_fsdp_gather_once: bool = False
+    # FSDP reduce-scatters the gradients once, after the last microbatch, instead of after every microbatch's backward;
+    # params are still resharded per layer (unlike --titan-fsdp-gather-once). Costs the unsharded gradients of the
+    # trainable params until the step's last backward: small under LoRA, the whole model's fp32 grads otherwise.
+    titan_fsdp_defer_grad_sync: bool = False
     # FSDP's gradient reduce dtype: bfloat16 halves the reduce-scatter buffers and bytes
     titan_fsdp_reduce_dtype: str = "float32"
     # --optimizer muon: DistMuon on the model's matrix parameters, AdamW on the rest
@@ -83,11 +87,15 @@ def validate_torchtitan_args(args) -> None:
     if args.titan_fsdp_gather_once and args.pipeline_model_parallel_size > 1:
         raise ValueError("--titan-fsdp-gather-once does not apply to the pipeline schedule; drop it under PP")
     # with gradient sync off until the last microbatch, FSDP accumulates the unsharded gradients in the reduce dtype
-    if args.titan_fsdp_gather_once and args.titan_fsdp_reduce_dtype != "float32":
+    deferring = "--titan-fsdp-gather-once" if args.titan_fsdp_gather_once else None
+    deferring = deferring or ("--titan-fsdp-defer-grad-sync" if args.titan_fsdp_defer_grad_sync else None)
+    if deferring and args.titan_fsdp_reduce_dtype != "float32":
         raise ValueError(
-            f"--titan-fsdp-gather-once would accumulate microbatch gradients in --titan-fsdp-reduce-dtype "
+            f"{deferring} would accumulate microbatch gradients in --titan-fsdp-reduce-dtype "
             f"{args.titan_fsdp_reduce_dtype}; use float32 with it"
         )
+    if args.titan_fsdp_defer_grad_sync and args.pipeline_model_parallel_size > 1:
+        raise ValueError("--titan-fsdp-defer-grad-sync does not apply to the pipeline schedule; drop it under PP")
     if args.ref_update_interval is not None:
         raise ValueError("--ref-update-interval is not supported by the torchtitan backend")
     if args.fp16:

@@ -230,11 +230,14 @@ class TitanTrainer(Configurable):
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def _defer_gradient_reduction(self, *, is_last_microbatch: bool) -> None:
-        # as TrainingEngine's own loop does: params stay gathered and grads local until the last microbatch
+        # as TrainingEngine's own loop does: grads stay local (and, under gather-once, params gathered) until the last microbatch
         root = self.model_parts[0]
         if self.config.parallelism.fsdp_defer_gradient_reduction and isinstance(root, FSDPModule):
             root.set_is_last_backward(is_last_microbatch)
-            root.set_reshard_after_backward(is_last_microbatch)
+            # gather-once (reshard_after_forward "never") also keeps the params gathered across microbatches;
+            # --titan-fsdp-defer-grad-sync defers only the gradient reduce-scatter
+            if self.config.parallelism.fsdp_reshard_after_forward == "never":
+                root.set_reshard_after_backward(is_last_microbatch)
             root.set_requires_gradient_sync(is_last_microbatch)
 
     def _reshard_kept_params(self) -> None:
