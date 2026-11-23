@@ -108,6 +108,11 @@ def _add_prefixed_server_args(parser, *, flag_prefix: str, dest_prefix: str, ski
     parser.add_argument = new_add_argument_wrapper
     ServerArgs.add_cli_args(parser)
     del parser.add_argument
+    # SGLang since sgl-project/sglang#51074 registers the removed --enable-dp-attention only to reject it, with a
+    # SUPPRESS default; attention DP is attn_dp_size > 1 there, so the absent flag reads as off.
+    dp_attention_dest = f"{dest_prefix}enable_dp_attention"
+    if not inherit and parser.get_default(dp_attention_dest) is argparse.SUPPRESS:
+        parser.set_defaults(**{dp_attention_dest: False})
 
 
 def collect_eval_sglang_overrides(args) -> dict:
