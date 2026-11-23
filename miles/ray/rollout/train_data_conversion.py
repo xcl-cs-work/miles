@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -23,6 +23,10 @@ from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
 from miles.utils.timer import Timer
 from miles.utils.types import Sample
 
+if TYPE_CHECKING:
+    # base_types imports the data source, which imports miles.utils.data, which imports this module
+    from miles.rollout.base_types import AuxSftRow
+
 logger = logging.getLogger(__name__)
 
 ROLLOUT_DATA_TENSOR_DTYPES = {
@@ -39,6 +43,7 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "opd_reverse_kl": "float32",
     "rollout_routed_experts": "int32",
     "rollout_indexer_topk": "int32",
+    "aux_sft_tokens": "int32",
 }
 
 ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
@@ -67,7 +72,29 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "num_microbatches": ValueSpec(codec="auto"),
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
+    "aux_sft_response_lengths": ValueSpec(codec="ndarray", dtype="int64"),
+    "aux_sft_weights": ValueSpec(codec="ndarray", dtype="float32"),
 }
+
+# Columns of the auxiliary SFT side batch (``RolloutFnTrainOutput.aux_sft_rows``); split across DP on their own.
+AUX_SFT_KEYS = ("aux_sft_tokens", "aux_sft_response_lengths", "aux_sft_weights")
+
+
+def build_aux_sft_columns(rows: "list[AuxSftRow]") -> dict[str, list]:
+    """The side batch's train-data columns, carried in the rollout metadata until conversion."""
+    for row in rows:
+        if not 0 < row.response_length < len(row.tokens):
+            raise ValueError(
+                f"aux SFT row needs a context and a target: response_length={row.response_length}, "
+                f"len(tokens)={len(row.tokens)}"
+            )
+        if not 0 < row.weight <= 1:
+            raise ValueError(f"aux SFT row weight must lie in (0, 1], got {row.weight}")
+    return {
+        "aux_sft_tokens": [list(row.tokens) for row in rows],
+        "aux_sft_response_lengths": [row.response_length for row in rows],
+        "aux_sft_weights": [float(row.weight) for row in rows],
+    }
 
 
 def convert_samples_to_train_data(
@@ -81,6 +108,8 @@ def convert_samples_to_train_data(
     Convert inference generated samples to training data.
     """
     if (f := custom_convert_samples_to_train_data_func) is not None:
+        if "aux_sft" in metadata:
+            raise ValueError("--custom-convert-samples-to-train-data-path would drop the rollout's aux SFT rows")
         fn_args = compute_custom_function_config(args, args.custom_convert_samples_to_train_data_path)
         return f(fn_args, samples)
 
@@ -231,6 +260,9 @@ def convert_samples_to_train_data(
     assert args.use_dynamic_global_batch_size == (x is not None)
     if x is not None:
         train_data["dynamic_global_batch_size"] = x
+
+    if (aux_sft := metadata.get("aux_sft")) is not None:
+        train_data.update(aux_sft)
 
     return train_data
 
@@ -413,7 +445,31 @@ def split_train_data_by_dp(
         shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
     else:
         shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config.dp_size)
+    _split_aux_sft_by_dp(data, shards)
     return shards
+
+
+def _split_aux_sft_by_dp(data: dict[str, Any], shards: list[dict[str, Any]]) -> None:
+    """Give every DP rank the same number of aux SFT rows, balanced by length; the tail past a multiple of DP drops.
+
+    Equal counts keep every rank's microbatch schedule non-empty, which the sharded backward needs.
+    """
+    if AUX_SFT_KEYS[0] not in data:
+        return
+    dp_size = len(shards)
+    lengths = [len(tokens) for tokens in data["aux_sft_tokens"]]
+    num_rows = len(lengths) // dp_size * dp_size
+    if num_rows < len(lengths):
+        logger.warning(
+            f"Dropping {len(lengths) - num_rows} aux SFT rows to split {len(lengths)} rows over DP {dp_size}"
+        )
+    if num_rows:
+        partitions = get_seqlen_balanced_partitions(lengths[:num_rows], dp_size, equal_size=True)
+    else:
+        partitions = [[] for _ in range(dp_size)]
+    for shard, partition in zip(shards, partitions, strict=True):
+        for key in AUX_SFT_KEYS:
+            shard[key] = [data[key][i] for i in partition]
 
 
 def can_precompute_dp_schedule(

@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 from contextlib import contextmanager, nullcontext
 from functools import partial
@@ -13,6 +14,7 @@ from miles.backends.megatron_utils.checkpoint_request import MegatronCkptLoadCon
 from miles.backends.training_utils.metrics import train_token_reporter
 from miles.backends.training_utils.parallel import get_parallel_state, set_parallel_state
 from miles.backends.training_utils.torch_native.actor import TorchNativeTrainRayActor
+from miles.backends.training_utils.torch_native.aux_sft import AuxSftTrainer
 from miles.backends.training_utils.torch_native.step_runner import LinearStepRunner, StepMetrics
 from miles.utils.audit_utils.config_snapshot.dumper import ConfigSnapshotDumper
 from miles.utils.audit_utils.config_snapshot.enabled import SNAPSHOT_TESTING_ENABLED
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 class FSDPTrainRayActor(TorchNativeTrainRayActor):
     backend_name = "fsdp"
+    aux_sft_optimizer: torch.optim.Optimizer | None = None
 
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
@@ -143,6 +146,7 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
 
         # Initialize LR scheduler
         self.lr_scheduler = get_lr_scheduler(args, self.optimizer)
+        self.aux_sft_optimizer = self._build_aux_sft_optimizer()
 
         self.global_step = 0
         self.micro_step = 0
@@ -156,6 +160,11 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
             self.ref_runner = LinearStepRunner(partial(self._logprob_forward, self.ref_model))
         self.model_parts = [self.model]
         self.optimizers = [self.optimizer]
+        if self.aux_sft_optimizer is not None:
+            self.optimizers.append(self.aux_sft_optimizer)
+            self.aux_sft = AuxSftTrainer(
+                self.args, optimizer=self.aux_sft_optimizer, parameters=lambda: self.model.parameters()
+            )
 
         self.weight_updater = self._build_weight_updater(self.model, FSDPHfWeightIterator.build)
 
@@ -337,6 +346,22 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
     def _step_runner(self) -> LinearStepRunner:
         return LinearStepRunner(self._forward, self._zero_grad, self._apply_step)
 
+    def _aux_sft_step_runner(self) -> LinearStepRunner:
+        return LinearStepRunner(self._forward, self._aux_sft_zero_grad, self._aux_sft_apply_step)
+
+    def _build_aux_sft_optimizer(self) -> torch.optim.Optimizer | None:
+        """A second AdamW over the same parameters: the aux SFT objective keeps its own moments and rate."""
+        args = self.args
+        if args.aux_sft_lr is None:
+            return None
+        return torch.optim.AdamW(
+            self.model.parameters(),
+            lr=args.aux_sft_lr,
+            betas=(args.aux_sft_adam_beta1, args.aux_sft_adam_beta2),
+            eps=args.aux_sft_adam_eps,
+            weight_decay=args.aux_sft_weight_decay,
+        )
+
     def _before_train(self) -> None:
         if SNAPSHOT_TESTING_ENABLED and not self._config_snapshot_train_recorded:
             ConfigSnapshotDumper.dump(stage="train_first_step", config={"args": self.args, "role": self.role})
@@ -376,6 +401,17 @@ class FSDPTrainRayActor(TorchNativeTrainRayActor):
             grad_norm=float(grad_norm.item()),
             extra_metrics={f"lr-pg_{i}": group["lr"] for i, group in enumerate(self.optimizer.param_groups)},
         )
+
+    def _aux_sft_zero_grad(self) -> None:
+        self.aux_sft_optimizer.zero_grad(set_to_none=True)
+
+    def _aux_sft_apply_step(self) -> StepMetrics:
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.aux_sft_clip_grad).full_tensor()
+        grad_norm = float(grad_norm.item())
+        # a non-finite norm left the clipped gradients non-finite; the step would poison the shared weights
+        if math.isfinite(grad_norm):
+            self.aux_sft_optimizer.step()
+        return StepMetrics(grad_norm=grad_norm)
 
     def _create_ref_model(self, ref_load_path: str | None):
         """Create a separate FSDP2 ref model. ALWAYS uses CPUOffloadPolicy (regardless of the actor's

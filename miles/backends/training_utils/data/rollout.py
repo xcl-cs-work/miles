@@ -633,13 +633,9 @@ def get_data_iterator(
         samples = rollout_data["total_lengths"]
         assert len(samples) == num_local_samples
         num_microbatches = []
-        # a fixed-shape trainer cannot run a microbatch above the cap, which the balanced partition ignores
-        num_microbatches_for = (
-            get_minimum_num_micro_batch_size if current_platform.dynamic_shapes else _num_microbatches_within_cap
-        )
         for i in range(num_steps_per_rollout):
             start, end = i * num_local_gbs, (i + 1) * num_local_gbs
-            num_microbatches.append(num_microbatches_for(samples[start:end], args.max_tokens_per_gpu * cp_size))
+            num_microbatches.append(count_microbatches(samples[start:end], args.max_tokens_per_gpu * cp_size))
 
         num_microbatches = torch.tensor(num_microbatches, dtype=torch.int, device=current_platform.current_device())
         GeneralPGUtil.create(dp_group).all_reduce(num_microbatches, dp_group, op=dist.ReduceOp.MAX)
@@ -678,6 +674,14 @@ def get_data_iterator(
         data_iterator,
         num_microbatches,
     )
+
+
+def count_microbatches(lengths: list[int], max_tokens: int) -> int:
+    """This rank's microbatch count for samples of `lengths` under the `max_tokens` cap, before the DP-wide max."""
+    # a fixed-shape trainer cannot run a microbatch above the cap, which the balanced partition ignores
+    if current_platform.dynamic_shapes:
+        return get_minimum_num_micro_batch_size(lengths, max_tokens)
+    return _num_microbatches_within_cap(lengths, max_tokens)
 
 
 def _num_microbatches_within_cap(lengths: list[int], max_tokens: int) -> int:

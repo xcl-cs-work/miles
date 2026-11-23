@@ -21,6 +21,7 @@ from miles.ray.rollout.rollout_sample_reporter import report_rollout_samples
 from miles.ray.rollout.router_manager import resolve_router_addrs, wait_session_server_ready
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
+    build_aux_sft_columns,
     convert_samples_to_train_data,
     split_train_data_by_dp,
 )
@@ -431,10 +432,15 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                     call_rollout_fn, self.generate_rollout, fn_args, rollout_id, self.data_source, evaluation=False
                 )
             metrics = data.metrics
+            aux_sft_rows = data.aux_sft_rows
             data = data.samples
             data, metadata = postprocess_rollout_data(
                 self.args, data, train_parallel_config=self._train_parallel_configs_of_model_id[trainer_model_id]
             )
+            if aux_sft_rows is not None:
+                if self.args.aux_sft_lr is None:
+                    raise ValueError("the rollout function returned aux SFT rows, but --aux-sft-lr is unset")
+                metadata["aux_sft"] = build_aux_sft_columns(aux_sft_rows)
             assert_samples_weight_version_sane(self.args, samples=data)
             if RolloutDataInjectionUtil.should_inject(self.args, rollout_id):
                 generated_data = data

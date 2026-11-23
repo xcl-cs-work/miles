@@ -74,11 +74,27 @@ def stamp_kv_cache_namespace(samples: Sample | list[Any], *, namespace: str | No
         samples.kv_cache_namespace = namespace
 
 
+@dataclass(frozen=True)
+class AuxSftRow:
+    """One supervised row of the auxiliary SFT objective (``--aux-sft-lr``).
+
+    ``tokens`` is context followed by the target; the last ``response_length`` tokens are supervised.
+    ``weight`` in (0, 1] scales the row's sample-mean NLL; the objective divides by the step's total weight.
+    """
+
+    tokens: list[int]
+    response_length: int
+    weight: float = 1.0
+
+
 # TODO make it frozen
 @dataclass
 class RolloutFnTrainOutput:
     samples: list[list[Sample]]
     metrics: dict[str, Any] = None
+    # Rows trained by the auxiliary SFT objective with its own optimizer state, after the policy update.
+    # They bypass reward shaping, trimming and the policy loss; see AuxSftRow.
+    aux_sft_rows: list[AuxSftRow] | None = None
 
 
 # TODO make it frozen

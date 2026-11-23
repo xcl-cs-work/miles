@@ -57,6 +57,8 @@ function needs to subclass `miles.rollout.base_types.BaseRolloutFn`.
 
 `rollout/raw_reward` comes only from `RolloutFnTrainOutput.metrics`: the default rollouts fill it with `miles.rollout.filter_hub.base_types.MetricGatherer`, which collects rewards before dynamic sampling filters. A replacement must report it the same way; the trainer logs only the retained-batch mean, as `rollout/raw_reward_filtered`. A function that returns a bare sample list reports no metrics, so its run has no `rollout/raw_reward`.
 
+A training rollout may also return `RolloutFnTrainOutput.aux_sft_rows`: supervised rows (`miles.rollout.base_types.AuxSftRow`) that skip reward shaping and the policy loss, and train once per rollout with a second optimizer state over the same weights, configured by the `--aux-sft-*` flags (FSDP backend only). [`examples/ac2`](https://github.com/radixark/miles/blob/main/examples/ac2) trains its generative critic this way.
+
 **Reference:** [`examples/experimental/multi_agent/rollout_with_multi_agents.py`](https://github.com/radixark/miles/blob/main/examples/experimental/multi_agent/rollout_with_multi_agents.py).
 
 ### `--custom-generate-function-path`

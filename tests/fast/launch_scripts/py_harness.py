@@ -78,6 +78,7 @@ def iter_py_launch_scripts() -> list[PyLaunchScript]:
     paths = sorted(
         [
             *(REPO_ROOT / "scripts").rglob("run_*.py"),
+            REPO_ROOT / "examples/ac2/run_qwen3_0_6b_ac2.py",
             REPO_ROOT / "examples/multi_lora/serve_qwen3_30b_a3b_tinker.py",
             REPO_ROOT / "examples/geo3k_vlm/run_geo3k_qwen3_8_27b.py",
             REPO_ROOT / "examples/geo3k_vlm/multi_turn/run_geo3k_vlm_multi_turn_token_space.py",
