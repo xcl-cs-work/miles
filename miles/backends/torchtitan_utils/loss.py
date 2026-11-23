@@ -19,9 +19,14 @@ class RLLossAdapter(BaseLoss):
         self._results: dict[int, object] = {}
         self._cp_mesh = None
         self._grad_scale = 1.0
+        self._lm_head = None
 
     def set_context_parallel(self, mesh) -> None:
         self._cp_mesh = mesh
+
+    def set_lm_head(self, lm_head) -> None:
+        """Under --log-probs-backend fused_lm_head: `pred` is hidden states and the loss projects them itself."""
+        self._lm_head = lm_head
 
     def set_gradient_scale(self, scale: float) -> None:
         self._grad_scale = scale
@@ -43,6 +48,8 @@ class RLLossAdapter(BaseLoss):
 
         index = int(target.flatten()[0])
         batch = self._batches[index]
+        if self._lm_head is not None:
+            batch["lm_head"] = self._lm_head
         if self._is_training:
             loss, log_dict = self._closure(pred, batch)
             self._results[index] = log_dict

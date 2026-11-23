@@ -444,7 +444,8 @@ def _config_args(**overrides: object) -> Namespace:
         save=None,
         load=None,
     )
-    return Namespace(backend=TorchtitanArgsNamespace(**{**base, **overrides}))
+    # top-level TrainerConfig fields build_trainer_config reads beside the backend's
+    return Namespace(backend=TorchtitanArgsNamespace(**{**base, **overrides}), log_probs_backend="fused")
 
 
 def _checkpoint_dir(tmp_path, **config) -> str:

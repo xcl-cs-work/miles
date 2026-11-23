@@ -1326,6 +1326,7 @@ def test_fused_lm_head_backend_rejects_megatron_schedules_it_breaks(megatron_fla
 def test_fused_lm_head_backend_rejects_lora_on_the_output_layer(backend, lora_rank, targets, rejected):
     args = SimpleNamespace(
         log_probs_backend=backend,
+        train_backend="megatron",
         lora_rank=lora_rank,
         lora_adapter_path=None,
         hf_lora_targets=targets,

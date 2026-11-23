@@ -333,6 +333,11 @@ class Inkling2Model(Decoder):
         hidden = self.norm(block_attn_res(blocks, partial, self.output_query()))
         if self._skip_lm_head:
             return hidden
+        return self.project_logits(hidden)
+
+    def project_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        """The output layer on (rows of) the final hidden states: fp32 unembedding (with any LoRA delta), cut to
+        the real vocabulary, then the soft cap. `--log-probs-backend fused_lm_head` calls it a tile at a time."""
         logits = self.lm_head(hidden)[..., : self.unpadded_vocab_size]
         cap = self.final_logit_softcapping
         return cap * torch.tanh(logits / cap) if cap else logits

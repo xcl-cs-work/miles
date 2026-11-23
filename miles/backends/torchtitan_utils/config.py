@@ -492,6 +492,7 @@ def build_trainer_config(
         hf_assets_path=hf_assets_path,
         compile_backend=compile_backend,
         row_norm_projection=args.backend.titan_row_norm_projection,
+        chunked_lm_head=args.log_probs_backend == "fused_lm_head",
         output_dir=os.path.join(
             args.backend.save or tempfile.mkdtemp(prefix="miles-torchtitan-"), "torchtitan", dump_subdir
         ),

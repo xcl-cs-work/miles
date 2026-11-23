@@ -51,6 +51,13 @@ class _TrainingEngine(TrainingEngine):
             self.state_dict_adapter = type(self.state_dict_adapter)(self._checkpoint_model, hf_assets_path)
 
 
+@dataclass
+class _ProjectLogits:
+    """The `LMHead` of the fused_lm_head loss: the model's own output layer, applied to rows of hidden states."""
+
+    project: Callable[[torch.Tensor], torch.Tensor]
+
+
 class TitanTrainer(Configurable):
     """torchtitan's TrainingEngine builds, parallelizes, checkpoints and steps the model; miles feeds it
     variable-length packed microbatches through its own forward/backward loop."""
@@ -66,6 +73,9 @@ class TitanTrainer(Configurable):
         compile_backend: str | None = None
         # rescale weight rows to their pretrained norms around every optimizer step (model.project_row_norms)
         row_norm_projection: bool = False
+        # --log-probs-backend fused_lm_head: the model returns its final hidden states and the loss projects them
+        # through model.project_logits a tile at a time, so no [tokens x vocab] logits buffer is ever built
+        chunked_lm_head: bool = False
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
@@ -100,6 +110,19 @@ class TitanTrainer(Configurable):
         self.optimizers = self.engine.optim.optimizers
         self.device = self.engine.device
         self.loss_fn = self.engine.loss_fn
+        if config.chunked_lm_head:
+            self._chunk_lm_head()
+
+    def _chunk_lm_head(self) -> None:
+        assert not self.parallelism.pp_enabled, "--log-probs-backend fused_lm_head on torchtitan needs PP 1"
+        (model,) = self.model_parts
+        if not hasattr(model, "project_logits"):  # config-access-exempt: optional model method
+            raise ValueError(
+                f"--log-probs-backend fused_lm_head: {type(model).__name__} has no project_logits(hidden) to score "
+                "hidden-state tiles with; use --log-probs-backend fused"
+            )
+        model._skip_lm_head = True
+        self.loss_fn.set_lm_head(_ProjectLogits(model.project_logits))
 
     @property
     def step(self) -> int:

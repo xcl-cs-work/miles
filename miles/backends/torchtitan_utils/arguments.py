@@ -191,9 +191,10 @@ def _validate_platform_args(args) -> None:
             f"--multimodal-keys: multimodal training is not supported on {platform.device_type} yet; the trainer "
             "builds the language model alone there"
         )
-    if args.log_probs_backend == "fused" and not platform.triton_kernels:
+    if args.log_probs_backend in ("fused", "fused_lm_head") and not platform.triton_kernels:
         raise ValueError(
-            f"--log-probs-backend fused is a Triton kernel; on {platform.device_type} use --log-probs-backend torch"
+            f"--log-probs-backend {args.log_probs_backend} is a Triton kernel; on {platform.device_type} use "
+            "--log-probs-backend torch"
         )
     # colocate syncs through CUDA IPC, outside the transfer modes
     modes = platform.weight_transfer_modes
