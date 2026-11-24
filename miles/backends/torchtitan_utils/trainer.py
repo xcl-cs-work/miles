@@ -1,6 +1,3 @@
-import logging
-import os
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -52,12 +49,6 @@ class _TrainingEngine(TrainingEngine):
         super()._initialize_model(hf_assets_path=hf_assets_path, **kwargs)
         if self.state_dict_adapter is not None and self._checkpoint_model is not self.model_config:
             self.state_dict_adapter = type(self.state_dict_adapter)(self._checkpoint_model, hf_assets_path)
-
-
-# MILES_LOG_MICROBATCHES=1: one line per training microbatch (index, tokens, time, peak memory); it synchronizes the
-# GPU after each microbatch, so leave it off outside measurements
-_LOG_MICROBATCHES = os.environ.get("MILES_LOG_MICROBATCHES") == "1"
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -238,9 +229,6 @@ class TitanTrainer(Configurable):
                     self.engine.loss += loss.detach()
             else:
                 for index, (inputs, labels, model_kwargs, _) in enumerate(prepared):
-                    if _LOG_MICROBATCHES:
-                        started = time.perf_counter()
-                        torch.cuda.reset_peak_memory_stats()
                     self._defer_gradient_reduction(is_last_microbatch=index == len(prepared) - 1)
                     pred = self.model_parts[0](inputs, **model_kwargs)
                     loss, _ = self.loss_fn(pred, labels)
@@ -248,14 +236,6 @@ class TitanTrainer(Configurable):
                     with spmd.no_typecheck():
                         loss.backward()
                     self.engine.loss += loss.detach()
-                    if _LOG_MICROBATCHES:
-                        torch.cuda.synchronize()
-                        logger.info(
-                            f"microbatch {index + 1}/{len(prepared)}: tokens={inputs.numel()} "
-                            f"time={time.perf_counter() - started:.1f}s "
-                            f"peak_allocated={torch.cuda.max_memory_allocated() / 2**30:.1f}GiB "
-                            f"peak_reserved={torch.cuda.max_memory_reserved() / 2**30:.1f}GiB"
-                        )
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def run_forward(self, batches, compute: Callable) -> list:
