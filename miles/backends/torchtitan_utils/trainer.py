@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import spmd_types as spmd
 import torch
@@ -49,13 +50,6 @@ class _TrainingEngine(TrainingEngine):
         super()._initialize_model(hf_assets_path=hf_assets_path, **kwargs)
         if self.state_dict_adapter is not None and self._checkpoint_model is not self.model_config:
             self.state_dict_adapter = type(self.state_dict_adapter)(self._checkpoint_model, hf_assets_path)
-
-
-@dataclass
-class _ProjectLogits:
-    """The `LMHead` of the fused_lm_head loss: the model's own output layer, applied to rows of hidden states."""
-
-    project: Callable[[torch.Tensor], torch.Tensor]
 
 
 class TitanTrainer(Configurable):
@@ -114,7 +108,6 @@ class TitanTrainer(Configurable):
             self._chunk_lm_head()
 
     def _chunk_lm_head(self) -> None:
-        assert not self.parallelism.pp_enabled, "--log-probs-backend fused_lm_head on torchtitan needs PP 1"
         (model,) = self.model_parts
         if not hasattr(model, "project_logits"):  # config-access-exempt: optional model method
             raise ValueError(
@@ -122,7 +115,8 @@ class TitanTrainer(Configurable):
                 "hidden-state tiles with; use --log-probs-backend fused"
             )
         model._skip_lm_head = True
-        self.loss_fn.set_lm_head(_ProjectLogits(model.project_logits))
+        # the loss hub's LMHead protocol: the model's own output layer, applied to rows of hidden states
+        self.loss_fn.set_lm_head(SimpleNamespace(project=model.project_logits))
 
     @property
     def step(self) -> int:

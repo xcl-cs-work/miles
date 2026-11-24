@@ -14,6 +14,18 @@ from miles.utils.lora.utils import is_lora_enabled, lora_rollout_enabled
 _FSDP_REDUCE_DTYPES = ("float32", "bfloat16")
 
 
+def deferred_grad_reduction_flag(args) -> str | None:
+    """The flag that makes FSDP reduce-scatter the gradients once per step, after the last microbatch, or None.
+
+    --titan-fsdp-gather-once also keeps the params gathered across microbatches; --titan-fsdp-defer-grad-sync defers
+    the gradients only."""
+    if args.titan_fsdp_gather_once:
+        return "--titan-fsdp-gather-once"
+    if args.titan_fsdp_defer_grad_sync:
+        return "--titan-fsdp-defer-grad-sync"
+    return None
+
+
 @dataclass
 class TorchtitanArgs(FSDPArgs):
     # torchtitan.models.<name>.model_registry(<flavor>)
@@ -84,18 +96,20 @@ def validate_torchtitan_args(args) -> None:
             f"--update-weight-transfer-mode ici needs {tpu_shared_slice.ENV_VAR} on the trainer, naming the slice "
             "it shares with the engine"
         )
-    if args.titan_fsdp_gather_once and args.pipeline_model_parallel_size > 1:
-        raise ValueError("--titan-fsdp-gather-once does not apply to the pipeline schedule; drop it under PP")
+    deferring = deferred_grad_reduction_flag(args)
+    if deferring and args.pipeline_model_parallel_size > 1:
+        raise ValueError(f"{deferring} does not apply to the pipeline schedule; drop it under PP")
     # with gradient sync off until the last microbatch, FSDP accumulates the unsharded gradients in the reduce dtype
-    deferring = "--titan-fsdp-gather-once" if args.titan_fsdp_gather_once else None
-    deferring = deferring or ("--titan-fsdp-defer-grad-sync" if args.titan_fsdp_defer_grad_sync else None)
     if deferring and args.titan_fsdp_reduce_dtype != "float32":
         raise ValueError(
             f"{deferring} would accumulate microbatch gradients in --titan-fsdp-reduce-dtype "
             f"{args.titan_fsdp_reduce_dtype}; use float32 with it"
         )
-    if args.titan_fsdp_defer_grad_sync and args.pipeline_model_parallel_size > 1:
-        raise ValueError("--titan-fsdp-defer-grad-sync does not apply to the pipeline schedule; drop it under PP")
+    # the model's project_logits scores full-vocabulary rows on one stage (TitanTrainer._chunk_lm_head)
+    if args.log_probs_backend == "fused_lm_head" and (
+        args.pipeline_model_parallel_size > 1 or args.tensor_model_parallel_size > 1
+    ):
+        raise ValueError("--log-probs-backend fused_lm_head on torchtitan needs PP 1 and TP 1")
     if args.ref_update_interval is not None:
         raise ValueError("--ref-update-interval is not supported by the torchtitan backend")
     if args.fp16:

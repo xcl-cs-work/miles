@@ -32,6 +32,9 @@ class RLLossAdapter(BaseLoss):
         self._grad_scale = scale
 
     def arm(self, batches: list, closure: Callable, *, is_training: bool) -> None:
+        if self._lm_head is not None:
+            for batch in batches:
+                batch["lm_head"] = self._lm_head
         self._batches, self._closure, self._is_training = batches, closure, is_training
         self._results = {}
 
@@ -48,8 +51,6 @@ class RLLossAdapter(BaseLoss):
 
         index = int(target.flatten()[0])
         batch = self._batches[index]
-        if self._lm_head is not None:
-            batch["lm_head"] = self._lm_head
         if self._is_training:
             loss, log_dict = self._closure(pred, batch)
             self._results[index] = log_dict
