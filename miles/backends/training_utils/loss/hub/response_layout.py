@@ -325,6 +325,8 @@ class PackedSlices:
             with_entropy=with_entropy,
             max_seq_lens=self.batch.get("max_seq_lens"),
             rollout_sampling_mask=get_rollout_sampling_masks(self.batch) if use_sampling_mask else None,
+            # torchtitan's fused_lm_head forward-only passes hand over hidden states too (TitanTrainer)
+            lm_head=self.batch.get("lm_head"),
         )
 
     def _sampling_masks(self):

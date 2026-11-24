@@ -66,6 +66,8 @@ class _Provider(TorchNativeTrainRayActor):
             ci_test=False,
             use_sampling_support_replay=False,
             save_debug_train_data=None,
+            use_rollout_logprobs=False,
+            get_mismatch_metrics=False,
         )
         self.model_parts = [MagicMock()]
         self.optimizers = [object()]
@@ -139,6 +141,24 @@ def test_the_rollout_step_runs_ref_then_actor_then_optimizer_under_the_right_sta
     assert step["steps"] == [actor.runner]
     assert rollout_data == {"ref_log_probs": [1], "log_probs": [1], "adv": True}
     assert step["replay"].attach.call_args.kwargs["align"] is actor.align_token_side_channel
+
+
+@pytest.mark.parametrize(("get_mismatch_metrics", "scores_actor"), [(False, False), (True, True)])
+def test_rollout_logprobs_skip_the_actor_forward_unless_mismatch_metrics_need_it(
+    step, get_mismatch_metrics, scores_actor
+):
+    actor = _Provider()
+    actor.ref_runner = None
+    actor.args.use_rollout_logprobs = True
+    actor.args.get_mismatch_metrics = get_mismatch_metrics
+    rollout_data = {}
+
+    actor._train_core(rollout_id=3, rollout_data=rollout_data)
+
+    assert step["log_probs"] == ([(actor.runner, "")] if scores_actor else [])
+    assert ("log_probs" in rollout_data) is scores_actor
+    assert "rewind" in step["stages"]
+    assert step["steps"] == [actor.runner]
 
 
 @pytest.mark.parametrize("dumps_train_data", [True, False])

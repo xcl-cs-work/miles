@@ -948,9 +948,11 @@ def validate_log_probs_backend_args(args) -> None:
 
 def _validate_fused_lm_head_args(args) -> None:
     """The model returns the output layer's input, so only losses that score target tokens can read it."""
-    if args.train_backend != "megatron":
+    # megatron: GPTModel's output_processor; torchtitan: a model with project_logits (TitanTrainer._chunk_lm_head)
+    if args.train_backend not in ("megatron", "torchtitan"):
         raise ValueError(
-            "--log-probs-backend fused_lm_head needs --train-backend megatron (GPTModel's output_processor)"
+            "--log-probs-backend fused_lm_head needs --train-backend megatron or torchtitan, "
+            f"got {args.train_backend}"
         )
     if args.loss_type not in ("policy_loss", "sft_loss"):
         raise ValueError(
@@ -959,6 +961,8 @@ def _validate_fused_lm_head_args(args) -> None:
     # the raw flag: args.multi_lora is derived from it later, in validate_lora_args
     if args.multi_lora_n_adapters > 0:
         raise ValueError("--log-probs-backend fused_lm_head does not support multi-LoRA (--multi-lora-n-adapters)")
+    if args.train_backend != "megatron":
+        return
     # Megatron runs the combined 1F1B schedule only with this overlap, and that schedule takes no output_processor
     if args.overlap_moe_expert_parallel_comm:
         raise ValueError(
@@ -977,8 +981,8 @@ def _validate_fused_lm_head_args(args) -> None:
 
 def _validate_fused_lm_head_lora_targets(args) -> None:
     """Bridge wraps a LoRA-adapted output layer in LoRALinear, which has none of the Megatron layer's attributes
-    fused_lm_head reads."""
-    if args.log_probs_backend != "fused_lm_head" or not is_lora_enabled(args):
+    fused_lm_head reads. torchtitan's tiles call the model's own (LoRA-wrapped) output layer, so it is exempt."""
+    if args.log_probs_backend != "fused_lm_head" or not is_lora_enabled(args) or args.train_backend != "megatron":
         return
     adapted = unembed_lora_targets(args.hf_lora_targets, load_hf_config(args.hf_checkpoint).to_dict())
     if adapted:

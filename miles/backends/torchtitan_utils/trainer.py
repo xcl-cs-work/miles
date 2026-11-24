@@ -1,5 +1,9 @@
+import logging
+import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import spmd_types as spmd
 import torch
@@ -51,6 +55,12 @@ class _TrainingEngine(TrainingEngine):
             self.state_dict_adapter = type(self.state_dict_adapter)(self._checkpoint_model, hf_assets_path)
 
 
+# MILES_LOG_MICROBATCHES=1: one line per training microbatch (index, tokens, time, peak memory); it synchronizes the
+# GPU after each microbatch, so leave it off outside measurements
+_LOG_MICROBATCHES = os.environ.get("MILES_LOG_MICROBATCHES") == "1"
+logger = logging.getLogger(__name__)
+
+
 class TitanTrainer(Configurable):
     """torchtitan's TrainingEngine builds, parallelizes, checkpoints and steps the model; miles feeds it
     variable-length packed microbatches through its own forward/backward loop."""
@@ -66,6 +76,9 @@ class TitanTrainer(Configurable):
         compile_backend: str | None = None
         # rescale weight rows to their pretrained norms around every optimizer step (model.project_row_norms)
         row_norm_projection: bool = False
+        # --log-probs-backend fused_lm_head: the model returns its final hidden states and the loss projects them
+        # through model.project_logits a tile at a time, so no [tokens x vocab] logits buffer is ever built
+        chunked_lm_head: bool = False
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
@@ -100,6 +113,19 @@ class TitanTrainer(Configurable):
         self.optimizers = self.engine.optim.optimizers
         self.device = self.engine.device
         self.loss_fn = self.engine.loss_fn
+        if config.chunked_lm_head:
+            self._chunk_lm_head()
+
+    def _chunk_lm_head(self) -> None:
+        (model,) = self.model_parts
+        if not hasattr(model, "project_logits"):  # config-access-exempt: optional model method
+            raise ValueError(
+                f"--log-probs-backend fused_lm_head: {type(model).__name__} has no project_logits(hidden) to score "
+                "hidden-state tiles with; use --log-probs-backend fused"
+            )
+        model._skip_lm_head = True
+        # the loss hub's LMHead protocol: the model's own output layer, applied to rows of hidden states
+        self.loss_fn.set_lm_head(SimpleNamespace(project=model.project_logits))
 
     @property
     def step(self) -> int:
@@ -206,6 +232,9 @@ class TitanTrainer(Configurable):
                     self.engine.loss += loss.detach()
             else:
                 for index, (inputs, labels, model_kwargs, _) in enumerate(prepared):
+                    if _LOG_MICROBATCHES:
+                        started = time.perf_counter()
+                        torch.cuda.reset_peak_memory_stats()
                     self._defer_gradient_reduction(is_last_microbatch=index == len(prepared) - 1)
                     pred = self.model_parts[0](inputs, **model_kwargs)
                     loss, _ = self.loss_fn(pred, labels)
@@ -213,6 +242,14 @@ class TitanTrainer(Configurable):
                     with spmd.no_typecheck():
                         loss.backward()
                     self.engine.loss += loss.detach()
+                    if _LOG_MICROBATCHES:
+                        torch.cuda.synchronize()
+                        logger.info(
+                            f"microbatch {index + 1}/{len(prepared)}: tokens={inputs.numel()} "
+                            f"time={time.perf_counter() - started:.1f}s "
+                            f"peak_allocated={torch.cuda.max_memory_allocated() / 2**30:.1f}GiB "
+                            f"peak_reserved={torch.cuda.max_memory_reserved() / 2**30:.1f}GiB"
+                        )
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def run_forward(self, batches, compute: Callable) -> list:
@@ -230,11 +267,14 @@ class TitanTrainer(Configurable):
         return self.loss_fn.collect() if self.has_last_stage() else []
 
     def _defer_gradient_reduction(self, *, is_last_microbatch: bool) -> None:
-        # as TrainingEngine's own loop does: params stay gathered and grads local until the last microbatch
+        # as TrainingEngine's own loop does: grads stay local (and, under gather-once, params gathered) until the last microbatch
         root = self.model_parts[0]
         if self.config.parallelism.fsdp_defer_gradient_reduction and isinstance(root, FSDPModule):
             root.set_is_last_backward(is_last_microbatch)
-            root.set_reshard_after_backward(is_last_microbatch)
+            # gather-once (reshard_after_forward "never") also keeps the params gathered across microbatches;
+            # --titan-fsdp-defer-grad-sync defers only the gradient reduce-scatter
+            if self.config.parallelism.fsdp_reshard_after_forward == "never":
+                root.set_reshard_after_backward(is_last_microbatch)
             root.set_requires_gradient_sync(is_last_microbatch)
 
     def _reshard_kept_params(self) -> None:

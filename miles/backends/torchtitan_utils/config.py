@@ -31,6 +31,7 @@ from torchtitan.models.common.multimodal import MultimodalModel
 
 from miles import platforms
 from miles.backends.torchtitan_utils import lora
+from miles.backends.torchtitan_utils.arguments import deferred_grad_reduction_flag
 from miles.backends.torchtitan_utils.components import TiedCheckpointManager
 from miles.backends.torchtitan_utils.loss import RLLossAdapter
 from miles.backends.torchtitan_utils.trainer import TitanTrainer
@@ -317,7 +318,7 @@ def _parallelism_config(args: TrainerConfig) -> ParallelismConfig:
         num_pp_microbatches=_num_pipeline_microbatches(args),
         # --titan-fsdp-gather-once: one all-gather per pass and one reduce-scatter per step, holding full params and grads
         fsdp_reshard_after_forward="never" if args.backend.titan_fsdp_gather_once else "default",
-        fsdp_defer_gradient_reduction=args.backend.titan_fsdp_gather_once,
+        fsdp_defer_gradient_reduction=deferred_grad_reduction_flag(args.backend) is not None,
     )
 
 
@@ -492,6 +493,7 @@ def build_trainer_config(
         hf_assets_path=hf_assets_path,
         compile_backend=compile_backend,
         row_norm_projection=args.backend.titan_row_norm_projection,
+        chunked_lm_head=args.log_probs_backend == "fused_lm_head",
         output_dir=os.path.join(
             args.backend.save or tempfile.mkdtemp(prefix="miles-torchtitan-"), "torchtitan", dump_subdir
         ),
